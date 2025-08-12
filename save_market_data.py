@@ -35,42 +35,52 @@ TICKERS_TO_PROCESS = load_tickers_from_json()
 
 # --- 2. 기술적 지표 계산 ---
 def calculate_technicals(df):
-    df = df.sort_values(by='date').reset_index(drop=True)
+    df = df.sort_values(by='daily_date').reset_index(drop=True)
     
     # 기본 지표
-    df['ma_20d'] = df['close'].rolling(window=20).mean()
-    df['ma_50d'] = df['close'].rolling(window=50).mean()
-    df['ma_100d'] = df['close'].rolling(window=100).mean()
+    df['ma_20d'] = df['close_price'].rolling(window=20).mean()
+    df['ma_50d'] = df['close_price'].rolling(window=50).mean()
+    df['ma_100d'] = df['close_price'].rolling(window=100).mean()
     
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    delta = df['close_price'].diff()
+    # gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    # loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    # rs = gain / loss
+    # df['rsi_14d'] = 100 - (100 / (1 + rs))
+    
+    # 수정 제안 (EMA 방식):
+    gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
+    loss = -delta.where(delta < 0, 0).ewm(alpha=1/14, adjust=False).mean()
+
     rs = gain / loss
     df['rsi_14d'] = 100 - (100 / (1 + rs))
     
-    df['bollinger_mid'] = df['close'].rolling(window=20).mean()
-    std_20d = df['close'].rolling(window=20).std()
+    df['bollinger_mid'] = df['close_price'].rolling(window=20).mean()
+    std_20d = df['close_price'].rolling(window=20).std()
     df['bollinger_upper'] = df['bollinger_mid'] + (std_20d * 2)
     df['bollinger_lower'] = df['bollinger_mid'] - (std_20d * 2)
     
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
+    high_low = df['high_price'] - df['low_price']
+    high_close = (df['high_price'] - df['close_price'].shift()).abs()
+    low_close = (df['low_price'] - df['close_price'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['atr_14d'] = tr.rolling(window=14).mean()
+    # df['atr_14d'] = tr.rolling(window=14).mean()
+    
+    # 수정 제안 (EMA 방식):
+    df['atr_14d'] = tr.ewm(alpha=1/14, adjust=False).mean()
 
     # [신규] 암호화폐 전략 기반 지표 추가
     # 스토캐스틱
-    low_14 = df['low'].rolling(window=14).min()
-    high_14 = df['high'].rolling(window=14).max()
-    df['stochastic_k'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
+    low_14 = df['low_price'].rolling(window=14).min()
+    high_14 = df['high_price'].rolling(window=14).max()
+    df['stochastic_k'] = 100 * ((df['close_price'] - low_14) / (high_14 - low_14))
     df['stochastic_d'] = df['stochastic_k'].rolling(window=3).mean()
 
     # OBV
-    df['obv'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
+    df['obv'] = (np.sign(df['close_price'].diff()) * df['volume']).fillna(0).cumsum()
 
     # 켈트너 채널
-    df['keltner_mid'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['keltner_mid'] = df['close_price'].ewm(span=20, adjust=False).mean()
     df['keltner_upper'] = df['keltner_mid'] + (df['atr_14d'] * 2)
     df['keltner_lower'] = df['keltner_mid'] - (df['atr_14d'] * 2)
     
@@ -119,6 +129,15 @@ def process_daily_data(conn, stock_id, ticker, backfill=False):
 
         df = pd.DataFrame(data['historical'])
         df['date'] = pd.to_datetime(df['date']).dt.date
+        
+        df.rename(columns={
+                    'date': 'daily_date',
+                    'open': 'open_price',
+                    'high': 'high_price',
+                    'low': 'low_price',
+                    'close': 'close_price'
+                }, inplace=True)
+        
         df_with_technicals = calculate_technicals(df)
         
         df_to_save = df_with_technicals.dropna() if backfill else df_with_technicals.dropna().tail(1)
@@ -132,7 +151,7 @@ def process_daily_data(conn, stock_id, ticker, backfill=False):
         for _, row in df_to_save.iterrows():
             query = """
                 INSERT INTO daily_market_data (
-                    stock_item_id, date, open, high, low, close, volume, 
+                    stock_item_id, daily_date, open_price, high_price, low_price, close_price, volume, 
                     ma_20d, ma_50d, ma_100d, rsi_14d, 
                     bollinger_mid, bollinger_upper, bollinger_lower, atr_14d,
                     stochastic_k, stochastic_d, obv, 
@@ -141,14 +160,14 @@ def process_daily_data(conn, stock_id, ticker, backfill=False):
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
                     %s, %s, %s, %s, %s, %s
                 ) ON DUPLICATE KEY UPDATE
-                    open=VALUES(open), high=VALUES(high), low=VALUES(low), close=VALUES(close), volume=VALUES(volume),
+                    open_price=VALUES(open_price), high_price=VALUES(high_price), low_price=VALUES(low_price), close_price=VALUES(close_price), volume=VALUES(volume),
                     ma_20d=VALUES(ma_20d), ma_50d=VALUES(ma_50d), ma_100d=VALUES(ma_100d), rsi_14d=VALUES(rsi_14d),
                     bollinger_mid=VALUES(bollinger_mid), bollinger_upper=VALUES(bollinger_upper), bollinger_lower=VALUES(bollinger_lower), atr_14d=VALUES(atr_14d),
                     stochastic_k=VALUES(stochastic_k), stochastic_d=VALUES(stochastic_d), obv=VALUES(obv),
                     keltner_mid=VALUES(keltner_mid), keltner_upper=VALUES(keltner_upper), keltner_lower=VALUES(keltner_lower)
             """
             values = (
-                stock_id, row['date'], row['open'], row['high'], row['low'], row['close'], row['volume'],
+                stock_id, row['daily_date'], row['open_price'], row['high_price'], row['low_price'], row['close_price'], row['volume'],
                 row['ma_20d'], row['ma_50d'], row['ma_100d'], row['rsi_14d'],
                 row['bollinger_mid'], row['bollinger_upper'], row['bollinger_lower'], row['atr_14d'],
                 row['stochastic_k'], row['stochastic_d'], row['obv'],
@@ -161,7 +180,7 @@ def process_daily_data(conn, stock_id, ticker, backfill=False):
         if backfill:
             print(f"[SUCCESS] [daily_market_data] Backfilled historical data for '{ticker}'.")
         else:
-            print(f"[SUCCESS] [daily_market_data] Data for '{ticker}' on {df_to_save['date'].iloc[0]} saved.")
+            print(f"[SUCCESS] [daily_market_data] Data for '{ticker}' on {df_to_save['daily_date'].iloc[0]} saved.")
     except Exception as e:
         print(f"[ERROR] [daily_market_data] Error for '{ticker}': {e}")
 

@@ -1,4 +1,3 @@
-# populate_stock_list.py
 import requests
 from mysql.connector import Error
 
